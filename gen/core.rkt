@@ -1,29 +1,21 @@
-#lang racket/base
+#lang typed/racket
 
-(require racket/contract
-         racket/function
-         racket/list
-         racket/match
-         racket/promise
-         racket/random)
+(require typed/racket/random)
 
 (provide
  exn:fail:gen?
  exn:fail:gen:exhausted?
 
- gen?
- make-gen
+ shrink-tree
  shrink-tree?
  build-shrink-tree
- make-shrink-tree
  shrink-tree-map
  value
  shrink
- generator/c
  sample
- sample-shrink
- eager-shrink
- full-shrink
+ ;sample-shrink
+ ;eager-shrink
+ ;full-shrink
 
  gen:const
  gen:map
@@ -39,71 +31,59 @@
 (struct exn:fail:gen exn:fail ())
 (struct exn:fail:gen:exhausted exn:fail:gen ())
 
-(struct shrink-tree (val shrinks))
+(struct (a) shrink-tree ([val : a] [shrinks : (Promise (Listof (shrink-tree a)))]))
 
-(define/contract (value st)
-  (-> shrink-tree? any/c)
-  (shrink-tree-val st))
+(: value (All (a) (-> (shrink-tree a) a)))
+(define value shrink-tree-val)
 
-(define/contract (shrink st)
-  (-> shrink-tree? (listof shrink-tree?))
+(: shrink (All (a) (-> (shrink-tree a) (Listof (shrink-tree a)))))
+(define (shrink st)
   (force (shrink-tree-shrinks st)))
 
-(define/contract (build-shrink-tree val shr)
-  (-> any/c (-> any/c (listof any/c)) shrink-tree?)
+(: build-shrink-tree (All (a) (-> a (-> a (Listof a)) (shrink-tree a))))
+(define (build-shrink-tree val shr)
   (shrink-tree
    val
-   (lazy (map (lambda (v) (build-shrink-tree v shr))
+   (delay (map (lambda ([v : a]) (build-shrink-tree v shr))
               (shr val)))))
 
-(define/contract (make-shrink-tree val [shrinks (lazy '())])
-  (->* (any/c) ((promise/c (listof any/c))) shrink-tree?)
-  (shrink-tree val shrinks))
-
-(define/contract (shrink-tree-map f st)
-  (-> (-> any/c any/c) shrink-tree? shrink-tree?)
+(: shrink-tree-map (All (a b) (-> (-> a b) (shrink-tree a) (shrink-tree b))))
+(define (shrink-tree-map f st)
   (shrink-tree
    (f (value st))
-   (lazy (map (curry shrink-tree-map f)
-              (shrink st)))))
+   (delay (map (lambda ([st : (shrink-tree a)]) (shrink-tree-map f st))
+               (shrink st)))))
 
+(: shrink-tree-join (All (a) (-> (shrink-tree (shrink-tree a)) (shrink-tree a))))
 (define (shrink-tree-join st)
-  (match-let ([(shrink-tree (shrink-tree inner-val inner-shrinks) outer-shrinks) st])
-    (shrink-tree
-     inner-val
-     (lazy (append (map shrink-tree-join (force outer-shrinks))
-                   (force inner-shrinks))))))
+  (shrink-tree
+   (value (value st))
+   (delay (append (map (lambda ([st : (shrink-tree (shrink-tree a))])
+                         (shrink-tree-join st))
+                       (shrink st))
+                  (shrink (value st))))))
 
-(define generator/c
-  (-> pseudo-random-generator? exact-nonnegative-integer? shrink-tree?))
+(define-type (Gen a) (-> Pseudo-Random-Generator Natural (shrink-tree a)))
 
-(struct gen (f)
-  #:property prop:procedure (struct-field-index f))
-
-(define/contract (make-gen f)
-  (-> generator/c gen?)
-  (gen f))
-
-(define/contract (sample g [n 10] [rng (current-pseudo-random-generator)])
-  (->* (gen?) (exact-positive-integer? pseudo-random-generator?) (listof any/c))
-  (for/list ([s (in-range n)])
-    (shrink-tree-val (g rng (expt s 2)))))
+(: sample (All (a) (->* ((Gen a)) (Natural Pseudo-Random-Generator) (Listof a))))
+(define (sample g [n 10] [rng (current-pseudo-random-generator)])
+  (for/list ([s : Natural (in-range n)])
+    (value (g rng (expt s 2)))))
 
 ; it would be pretty neat to have a visual program for exploring shrink trees
-(define/contract (sample-shrink g [size 30] [n 4] [depth 8] [rng (current-pseudo-random-generator)])
-  (->* (gen?) (exact-positive-integer?
-               exact-positive-integer?
-               exact-positive-integer?
-               pseudo-random-generator?)
-       (values any/c (listof (listof any/c))))
+(: sample-shrink (All (a) (->* ((Gen a)) (Natural Natural Natural Pseudo-Random-Generator)
+                               (Values a (Listof (U (Listof (U a '...)) '...))))))
+(define (sample-shrink g [size 30] [n 4] [depth 8] [rng (current-pseudo-random-generator)])
   (let ([st (g rng size)])
     (values
      (shrink-tree-val st)
      (let* ([shrinks (shrink st)]
-            [starts (random-sample shrinks (min n (length shrinks)) rng #:replacement? #f)])
+            [starts ((inst random-sample (shrink-tree a))
+                     shrinks (min n (length shrinks)) rng #:replacement? #f)])
        (for/list ([st starts])
-         (let loop ([st st]
-                    [depth depth])
+         (let loop : (Listof (U a '...))
+           ([st st]
+            [depth depth])
            (if (zero? depth)
                '(...)
                (match-let ([(shrink-tree val shrinks) st])
@@ -112,9 +92,9 @@
                        (list val)
                        (cons val (loop (random-ref shrinks rng) (sub1 depth)))))))))))))
 
-(define/contract (eager-shrink g [size 30] [rng (current-pseudo-random-generator)])
-  (->* (gen?) (exact-positive-integer? pseudo-random-generator?)
-       (values any/c (listof any/c)))
+(: eager-shrink (All (a) (->* ((Gen a)) (Natural Pseudo-Random-Generator)
+                              (Values a (Listof a)))))
+(define (eager-shrink g [size 30] [rng (current-pseudo-random-generator)])
   (let ([st (g rng size)])
     (values
      (shrink-tree-val st)
@@ -125,114 +105,108 @@
              (cons (shrink-tree-val (car shrinks))
                    (loop (car shrinks)))))))))
 
-(define/contract (full-shrink g [size 30] [first-n? #f] [max-depth? #f]
-                              [rng (current-pseudo-random-generator)])
-  (->* (gen?) (exact-positive-integer?
-               (or/c false/c exact-positive-integer?)
-               (or/c false/c exact-nonnegative-integer?)
-               pseudo-random-generator?)
-       (listof any/c))
+(: full-shrink (All (a) (->* ((Gen a)) (Natural (Option Natural) (Option Natural) Pseudo-Random-Generator)
+                             (Rec Tree (Pairof a (Listof (U Tree '...)))))))
+(define (full-shrink g [size 30] [first-n? #f] [max-depth? #f]
+                     [rng (current-pseudo-random-generator)])
   (let ([st (g rng size)])
     (let loop ([st st]
                [depth 0])
       (cons (value st)
             (if (and max-depth? (= max-depth? depth))
                 (list '...)
-                (let across ([shrinks (shrink st)]
-                             [n 0])
+                (let across : (Listof (U (Rec Tree (Pairof a (Listof (U Tree '...)))) '...))
+                  ([shrinks (shrink st)]
+                   [n 0])
                   (cond
                     [(null? shrinks) '()]
                     [(and first-n? (= first-n? n)) (list '...)]
                     [else (cons (loop (car shrinks) (add1 depth))
                                 (across (cdr shrinks) (add1 n)))])))))))
 
+(: gen:const (All (a) (-> a (Gen a))))
 (define (gen:const v)
-  (gen
-   (lambda (_rng _size)
-     (shrink-tree v (lazy '())))))
+  (lambda (_rng _size)
+    (shrink-tree v (delay '()))))
 
-(define/contract (gen:map g f)
-  (-> gen? (-> any/c any/c) gen?)
-  (gen
-   (lambda (rng size)
-     (shrink-tree-map f (g rng size)))))
+(: gen:map (All (a b) (-> (Gen a) (-> a b) (Gen b))))
+(define (gen:map g f)
+  (lambda (rng size)
+    (shrink-tree-map f (g rng size))))
 
-(define/contract (gen:bind g h)
-  (-> gen? (-> any/c gen?) gen?)
-  (gen
-   (lambda (rng size)
-     (let ([g-st (g rng size)]
-           [rng-state (pseudo-random-generator->vector rng)])
-       (shrink-tree-join
-        (shrink-tree-map
-         (λ (val) ((h val) (vector->pseudo-random-generator rng-state) size))
-         g-st))))))
+(: gen:bind (All (a b) (-> (Gen a) (-> a (Gen b)) (Gen b))))
+(define (gen:bind g h)
+  (lambda (rng size)
+    (let ([g-st (g rng size)]
+          [rng-state (pseudo-random-generator->vector rng)])
+      (shrink-tree-join
+       (shrink-tree-map
+        (λ ([val : a]) ((h val) (vector->pseudo-random-generator rng-state) size))
+        g-st)))))
 
+(: shrink-tree-filter (All (a) (-> (-> a Boolean) (shrink-tree a) (Option (shrink-tree a)))))
 (define (shrink-tree-filter p st)
-  (if (p (value st))
-      (shrink-tree
-       (value st)
-       (lazy (filter-map (curry shrink-tree-filter p) (shrink st))))
-      #f))
+  (let ([v (value st)])
+    (if (p v)
+        (shrink-tree
+         v
+         (delay
+           (filter-map (lambda ([st : (shrink-tree a)])
+                         (shrink-tree-filter p st))
+                       (shrink st))))
+        #f)))
 
-(define/contract (gen:filter g p [max-attempts 1000])
-  (->* (gen? (-> any/c boolean?))
-       ((or/c exact-positive-integer? +inf.0))
-       gen?)
-  (gen
-   (lambda (rng size)
-     (let search ([attempts 0]
-                  [size size])
-       (let ([st? (shrink-tree-filter p (g rng size))])
-         (cond
-           [st? st?]
-           [(= attempts max-attempts)
-            (raise (exn:fail:gen:exhausted (format "exhausted after ~a attempts" attempts)
-                                           (current-continuation-marks)))]
-           [else
-            (search (add1 attempts) (add1 size))]))))))
+(: gen:filter (All (a) (->* ((Gen a) (-> a Boolean)) (Natural) (Gen a))))
+(define (gen:filter g p [max-attempts 1000])
+  (lambda (rng size)
+    (let search : (shrink-tree a)
+      ([attempts : Natural 0]
+       [size : Natural size])
+      (let ([st? (shrink-tree-filter p (g rng size))])
+        (cond
+          [st? st?]
+          [(= attempts max-attempts)
+           (raise (exn:fail:gen:exhausted (format "exhausted after ~a attempts" attempts)
+                                          (current-continuation-marks)))]
+          [else
+           (search (add1 attempts) (add1 size))])))))
 
-(define/contract (gen:choice . gs)
-  (-> gen? gen? ... gen?)
-  (gen
-   (lambda (rng size)
-     ((random-ref gs rng) rng size))))
+(: gen:choice (All (a) (-> (Gen a) (Gen a) * (Gen a))))
+(define (gen:choice . gs)
+  (lambda (rng size)
+    ((random-ref gs rng) rng size)))
 
-(define/contract (gen:sized f)
-  (-> (-> exact-nonnegative-integer? gen?) gen?)
-  (gen
-   (lambda (rng size)
-     ((f size) rng size))))
+(: gen:sized (All (a) (-> (-> Natural (Gen a)) (Gen a))))
+(define (gen:sized f)
+  (lambda (rng size)
+    ((f size) rng size)))
 
-(define/contract (gen:resize g size)
-  (-> gen? exact-nonnegative-integer? gen?)
-  (gen
-   (lambda (rng _size)
-     (g rng size))))
+(: gen:resize (All (a) (-> (Gen a) Natural (Gen a))))
+(define (gen:resize g size)
+  (lambda (rng _size)
+    (g rng size)))
 
-(define/contract (gen:scale g f)
-  (-> gen? (-> exact-nonnegative-integer? exact-positive-integer?) gen?)
+(: gen:scale (All (a) (-> (Gen a) (-> Natural Natural) (Gen a))))
+(define (gen:scale g f)
   (gen:sized
-   (lambda (size)
+   (lambda ([size : Natural])
      (gen:resize g (f size)))))
 
-(define/contract (gen:no-shrink g)
-  (-> gen? gen?)
-  (gen
-   (lambda (rng size)
-     (shrink-tree (value (g rng size)) (lazy '())))))
+(: gen:no-shrink (All (a) (-> (Gen a) (Gen a))))
+(define (gen:no-shrink g)
+  (lambda (rng size)
+    (shrink-tree (value (g rng size)) (delay '()))))
 
-(define/contract (gen:with-shrink g shr)
-  (-> gen? (-> any/c (listof any/c)) gen?)
-  (gen
-   (lambda (rng size)
-     (build-shrink-tree (value (g rng size)) shr))))
+(: gen:with-shrink (All (a) (-> (Gen a) (-> a (Listof a)) (Gen a))))
+(define (gen:with-shrink g shr)
+  (lambda (rng size)
+    (build-shrink-tree (value (g rng size)) shr)))
 
-(module+ private
-  (provide gen shrink-tree))
+#;(module+ private
+  (provide shrink-tree))
 
 (module+ test
-  (require rackunit)
+  (require typed/rackunit)
 
   (check-equal? (sample (gen:const 1) 1)
                 '(1))
@@ -244,7 +218,7 @@
                 '(2))
 
   (check-equal? (sample (gen:bind (gen:const 1)
-                                  (lambda (v)
+                                  (lambda ([v : Natural])
                                     (gen:const (add1 v))))
                         1)
                 '(2))
@@ -258,5 +232,5 @@
    exn:fail:gen?
    (lambda ()
      (sample (gen:filter (gen:const 1)
-                         (lambda (v)
+                         (lambda ([v : Natural])
                            (eqv? v 2)))))))
