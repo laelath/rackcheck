@@ -1,13 +1,7 @@
-#lang racket/base
+#lang typed/racket
 
-(require racket/contract
-         racket/function
-         racket/list
-         racket/match
-         racket/promise
-         racket/random
-         "core.rkt"
-         (submod "core.rkt" private))
+(require typed/racket/random
+         "core.rkt")
 
 (provide
  (all-from-out "core.rkt")
@@ -34,31 +28,41 @@
  ;gen:hasheqv
  gen:frequency)
 
+(: halves (case->
+           (-> Natural (Listof Natural))
+           (-> Integer (Listof Integer))))
 (define (halves n)
   (let loop ([n (quotient n 2)])
-    (if (zero? n)
+    (if (>= 0 n)
         '()
         (cons n (loop (quotient n 2))))))
 
+(: shrink-natural (-> Natural (Listof Natural)))
+(define (shrink-natural n)
+  (if (zero? n)
+      '()
+      (cons 0 (map (λ ([m : Natural]) (cast (- n m) Natural)) (halves n)))))
+
+(: shrink-integer (-> Integer (Listof Integer)))
 (define (shrink-integer n)
   (if (zero? n)
       '()
       (append (if (negative? n) (list (abs n)) '())
-              (cons 0 (map (curry - n) (halves n))))))
+              (cons 0 (map (λ ([m : Integer]) (- n m)) (halves n))))))
 
+(: gen:natural (Gen Natural))
 (define gen:natural
-  (gen
-   (lambda (rng size)
-     (let ([n (random 0 (add1 size) rng)])
-       (build-shrink-tree n shrink-integer)))))
+  (lambda (rng size)
+    (let ([n (random 0 (add1 size) rng)])
+      (build-shrink-tree n shrink-natural))))
 
+(: gen:integer (Gen Integer))
 (define gen:integer
-  (gen
-   (lambda (rng size)
-     (let ([n (random (- size) (add1 size) rng)])
-       (build-shrink-tree n shrink-integer)))))
+  (lambda (rng size)
+    (let ([n (random (- size) (add1 size) rng)])
+      (build-shrink-tree n shrink-integer))))
 
-(module+ test
+#;(module+ test
   (require rackunit)
 
   (define-syntax-rule (tc name body ...)
@@ -93,14 +97,16 @@
                         (65 64 56 0)))
       (sample-shrink gen:natural 300))))
 
-(define/contract (gen:integer-in lo hi)
-  (->i ([lo exact-integer?]
-        [hi (lo) (>=/c lo)])
-       [result gen?])
-  (gen:map (gen:resize gen:natural (- hi lo))
-           (curry + lo)))
+(: gen:integer-in (-> ([lo : Integer]
+                       [hi : Integer])
+                      #:pre (lo hi) (<= lo hi)
+                      (Gen Integer)))
+(define (gen:integer-in lo hi)
+  (lambda (rng _size)
+    (make-shrink-tree
+     (random lo (add1 hi) rng))))
 
-(module+ test
+#;(module+ test
   (tc "integer-in"
     (check-equal? (sample (gen:integer-in 0 20) 5) '(6 3 19 12 10))
     (check-equal? (sample (gen:integer-in -5 5) 5) '(3 1 3 2 -3)))
@@ -115,25 +121,24 @@
                          (-38 -78 -93 -146 -149 -150 -175 -187 ...)))
       (sample-shrink (gen:integer-in -200 20)))))
 
+(: gen:real (Gen Real))
 (define gen:real
-  (gen
-   (lambda (rng _size)
-     (make-shrink-tree (random rng)))))
+  (lambda (rng _size)
+    (make-shrink-tree (random rng))))
 
-(define/contract (gen:one-of xs)
-  (-> (non-empty-listof any/c) gen?)
-  (gen
-   (lambda (rng _size)
-     (make-shrink-tree (random-ref xs rng)))))
+(: gen:one-of (All (a) (-> (Pairof a (Listof a)) (Gen a))))
+(define (gen:one-of xs)
+  (lambda (rng _size)
+    (make-shrink-tree (random-ref xs rng))))
 
+(: gen:boolean (Gen Boolean))
 (define gen:boolean
-  (gen
-   (lambda (rng _size)
-     (case (random 0 2 rng)
-       [(0) (make-shrink-tree #f)]
-       [(1) (make-shrink-tree #t (lazy (list (make-shrink-tree #f))))]))))
+  (lambda (rng _size)
+    (if (zero? (random 0 2 rng))
+        (make-shrink-tree #f)
+        (make-shrink-tree #t (delay (list (make-shrink-tree #f)))))))
 
-(module+ test
+#;(module+ test
   (tc "boolean"
     (check-equal? (sample gen:boolean 5)
                   '(#f #f #t #t #f)))
@@ -148,14 +153,15 @@
     (check-values (#t '((#f)))
       (sample-shrink gen:boolean))))
 
-(define char-integer/c
-  (or/c (integer-in 0      #xD7FF)
-        (integer-in #xE000 #x10FFFF)))
+(define-type Char-Integer (Refine [c : Integer]
+                                  (or (and (<= 0 c) (<= c #xD7FF))
+                                      (and (<= #xE000 c) (<= c #x10FFFF)))))
 
-(define/contract (gen:char-in lo hi)
-  (->i ([lo char-integer/c]
-        [hi (lo) (and/c char-integer/c (>/c lo))])
-       [result gen?])
+(: gen:char-in (-> ([lo : Char-Integer]
+                    [hi : Char-Integer])
+                   #:pre (lo hi) (<= lo hi)
+                   (Gen Char)))
+(define (gen:char-in lo hi)
   (define g
     (if (or (and (< lo #xD800)
                  (< hi #xD800))
@@ -168,32 +174,40 @@
 
   (gen:map g integer->char))
 
+(: gen:char (Gen Char))
 (define gen:char
   (gen:char-in 0 255))
 
+(: gen:char-letter (Gen Char))
 (define gen:char-letter
   (gen:choice
    (gen:char-in 65 90)
    (gen:char-in 97 122)))
 
+(: gen:char-digit (Gen Char))
 (define gen:char-digit
   (gen:char-in 48 57))
 
+(: gen:char-alphanumeric (Gen Char))
 (define gen:char-alphanumeric
   (gen:choice
    gen:char-letter
    gen:char-digit))
 
-(define/contract (gen:tuple . gs)
-  (-> gen? gen? ... gen?)
-  (gen
-   (lambda (rng size)
-     (let ([xs (map (lambda (g) (g rng size)) gs)])
-       (shrink-tree-map
-        (curry map value)
-        (build-shrink-tree xs shrink-one))))))
+(: gen:tuple (All (a ...) (-> (Gen a) ... a (Gen (List a ... a)))))
+(define (gen:tuple . gs)
+  (lambda (rng size)
+    (let ([xs : (List (Shrink-Tree a) ... a)
+              (map (lambda #:forall (b) ([g : (Gen b)]) (g rng size)) gs)])
+      #;(shrink-tree-map
+       (curry map value)
+       (build-shrink-tree xs shrink-one))
+      (shrink-tree-map
+       (lambda ([x : (List (Shrink-Tree a) ... a)]) : (List a ... a)
+         (map value x))
+       (make-shrink-tree xs)))))
 
-(module+ test
+#;(module+ test
   (tc "tuple"
     (check-equal? (sample (gen:tuple gen:natural gen:char-digit) 4)
                   '((0 #\1) (1 #\5) (2 #\7) (6 #\7))))
@@ -216,54 +230,60 @@
                       (0 ||))))
       (sample-shrink (gen:tuple gen:natural (gen:symbol gen:char-digit)) 20 2 8))))
 
+(: shrink-one (All (a) (-> (Listof (Shrink-Tree a)) (Listof (Listof (Shrink-Tree a))))))
 (define (shrink-one xs)
   (match xs
     ['() '()]
     [(cons x xs)
-     (append (for/list ([shrunk-x (shrink x)])
+     (append (for/list : (Listof (Listof (Shrink-Tree a)))
+               ([shrunk-x (shrink x)])
                (cons shrunk-x xs))
-             (for/list ([shrunk-xs (shrink-one xs)])
+             (for/list : (Listof (Listof (Shrink-Tree a)))
+               ([shrunk-xs (shrink-one xs)])
                (cons x shrunk-xs)))]))
 
+(: removes (All (a) (-> Natural Natural (Listof a) (Listof (Listof a)))))
 (define (removes k n xs)
-  (cond
-    [(> k n) '()]
-    [(= k n) '(())]
-    [else (let-values ([(xs-l xs-r) (split-at xs k)])
-            (cons xs-r (for/list ([r-xs (removes k (- n k) xs-r)])
-                         (append xs-l r-xs))))]))
+  (let ([c (- n k)])
+    (cond
+      [(> 0 c) '()]
+      [(= 0 c) '(())]
+      [else (let-values ([(xs-l xs-r) (split-at xs k)])
+              (cons xs-r (for/list : (Listof (Listof a))
+                           ([r-xs (removes k c xs-r)])
+                           (append xs-l r-xs))))])))
 
+(: shrink-list (All (a) (-> (Listof (Shrink-Tree a)) (Listof (Listof (Shrink-Tree a))))))
 (define (shrink-list xs)
   (let ([n (length xs)])
     (if (= n 0)
         '()
         (append
-         (append* (for/list ([k (cons n (halves n))])
+         (append* (for/list : (Listof (Listof (Listof (Shrink-Tree a))))
+                    ([k : Natural (cons n (halves n))])
                     (removes k n xs)))
          (shrink-one xs)))))
 
-(define/contract (gen:list g #:max-length [max-len 128])
-  (->* (gen?) (#:max-length exact-nonnegative-integer?) gen?)
-  (gen
-   (lambda (rng size)
-     (let* ([len (min (random 0 (add1 size) rng) max-len)]
-            [xs (for/list ([_ (in-range len)])
-                  (g rng size))])
-       (shrink-tree-map
-        (curry map value)
-        (build-shrink-tree xs shrink-list))))))
-
-(define/contract (gen:exact-list g len)
-  (-> gen? exact-nonnegative-integer? gen?)
-  (gen
-   (lambda (rng size)
-     (let ([xs (for/list ([_ (in-range len)])
+(: gen:list (All (a) (->* ((Gen a)) (#:max-length Natural) (Gen (Listof a)))))
+(define (gen:list g #:max-length [max-len 128])
+  (lambda (rng size)
+    (let* ([len (min (random 0 (add1 size) rng) max-len)]
+           [xs (for/list : (Listof (Shrink-Tree a)) ([_ (in-range len)])
                  (g rng size))])
-       (shrink-tree-map
-        (curry map value)
-        (build-shrink-tree xs shrink-one))))))
+      ((inst shrink-tree-map (Listof (Shrink-Tree a)) (Listof a))
+       (curry (inst map a (Shrink-Tree a)) value)
+       (build-shrink-tree xs (inst shrink-list a))))))
 
-(module+ test
+(: gen:exact-list (All (a) (-> (Gen a) Natural (Gen (Listof a)))))
+(define (gen:exact-list g len)
+  (lambda (rng size)
+    (let ([xs (for/list : (Listof (Shrink-Tree a)) ([_ (in-range len)])
+                (g rng size))])
+      ((inst shrink-tree-map (Listof (Shrink-Tree a)) (Listof a))
+       (curry (inst map a (Shrink-Tree a)) value)
+       (build-shrink-tree xs (inst shrink-one a))))))
+
+#;(module+ test
   (tc "list"
     (check-equal? (sample (gen:list gen:natural) 4)
                   '(()
@@ -291,29 +311,27 @@
                       ())))
       (sample-shrink (gen:list gen:natural) 20 2 8))))
 
-(define gen:vector
-  (make-keyword-procedure
-   (lambda (kws kw-args . args)
-     (gen:map (keyword-apply gen:list kws kw-args args)
-              list->vector))))
+(: gen:vector (All (a) (->* ((Gen a)) (#:max-length Natural) (Gen (Vectorof a)))))
+(define (gen:vector g #:max-length [max-len 128])
+  (gen:map (gen:list g #:max-length max-len)
+           (inst list->vector a)))
 
-(define gen:bytes
-  (make-keyword-procedure
-   (lambda (kws kw-args [g (gen:integer-in 0 255)] . args)
-     (gen:map (keyword-apply gen:list kws kw-args g args)
-              list->bytes))))
+(define-type Byte-Integer (Refine [i : Integer] (and (<= 0 i) (<= i 255))))
 
-(define gen:string
-  (make-keyword-procedure
-   (lambda (kws kw-args [g gen:char] . args)
-     (gen:map (keyword-apply gen:list kws kw-args g args)
-              list->string))))
+(: gen:bytes (->* () ((Gen Byte-Integer) #:max-length Natural) (Gen Bytes)))
+(define (gen:bytes [g (gen:integer-in 0 255)] #:max-length [max-len 128])
+  (gen:map (gen:list g #:max-length max-len)
+           list->bytes))
 
-(define gen:symbol
-  (make-keyword-procedure
-   (lambda (kws kw-args . args)
-     (gen:map (keyword-apply gen:string kws kw-args args)
-              string->symbol))))
+(: gen:string (->* () ((Gen Char) #:max-length Natural) (Gen String)))
+(define (gen:string [g gen:char] #:max-length [max-len 128])
+  (gen:map (gen:list g #:max-length max-len)
+           list->string))
+
+(: gen:symbol (->* () ((Gen Char) #:max-length Natural) (Gen Symbol)))
+(define (gen:symbol [g gen:char] #:max-length [max-len 128])
+  (gen:map (gen:string g #:max-length max-len)
+           string->symbol))
 
 #;(define (make-gen:hash who constructor)
   (lambda pairs
@@ -352,23 +370,32 @@
 ;(define-gen:hash gen:hasheq make-immutable-hasheq)
 ;(define-gen:hash gen:hasheqv make-immutable-hasheqv)
 
-(define/contract (gen:frequency freqs)
-  (-> (non-empty-listof (cons/c exact-positive-integer? gen?)) gen?)
-  (define total (apply + (map car freqs)))
-  (let ([total (apply + (map car freqs))])
+(define-type (Freq a) (Pairof Exact-Positive-Integer (Gen a)))
+
+(: freq-sum (All (a) (-> (Pairof (Freq a) (Listof (Freq a))) Exact-Positive-Integer)))
+(define (freq-sum freqs)
+  (foldl (λ ([freq : (Freq a)] [acc : Exact-Positive-Integer])
+           (+ (car freq) acc))
+         (car (first freqs))
+         (rest freqs)))
+
+(: gen:frequency (All (a) (-> (Pairof (Freq a) (Listof (Freq a))) (Gen a))))
+(define (gen:frequency freqs)
+  (let ([total : Exact-Positive-Integer (freq-sum freqs)])
     (gen:bind
      (gen:no-shrink
       (gen:integer-in 0 (sub1 total)))
-     (lambda (n)
-       (let loop ([sum 0]
-                  [freqs freqs])
+     (lambda ([n : Integer])
+       (let loop : (Gen a)
+         ([sum 0]
+          [freqs freqs])
          (let* ([pair (car freqs)]
                 [sum* (+ (car pair) sum)])
            (if (> sum* n)
                (cdr pair)
                (loop sum* (cdr freqs)))))))))
 
-(module+ test
+#;(module+ test
   (tc "frequency"
     (check-equal?
      (sample (gen:frequency `((7 . ,gen:natural)

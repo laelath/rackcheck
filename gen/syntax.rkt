@@ -1,4 +1,8 @@
-#lang racket/base
+#lang typed/racket
+
+#;(require (for-syntax racket/base
+                     syntax/parse)
+         "core.rkt")
 
 (require (for-syntax racket/base
                      syntax/parse)
@@ -9,7 +13,8 @@
  gen:delay)
 
 (define (gen:let-helper r)
-  (cond
+  (gen:const r)
+  #;(cond
     [(gen? r) r]
     [else (gen:const r)]))
 

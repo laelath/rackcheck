@@ -6,16 +6,19 @@
  exn:fail:gen?
  exn:fail:gen:exhausted?
 
- shrink-tree
+ Gen
+ Shrink-Tree
+
  shrink-tree?
+ make-shrink-tree
  build-shrink-tree
  shrink-tree-map
  value
  shrink
  sample
- ;sample-shrink
- ;eager-shrink
- ;full-shrink
+ sample-shrink
+ eager-shrink
+ full-shrink
 
  gen:const
  gen:map
@@ -31,39 +34,45 @@
 (struct exn:fail:gen exn:fail ())
 (struct exn:fail:gen:exhausted exn:fail:gen ())
 
-(struct (a) shrink-tree ([val : a] [shrinks : (Promise (Listof (shrink-tree a)))]))
+(struct (a) shrink-tree ([val : a] [shrinks : (Promise (Listof (Shrink-Tree a)))]) #:type-name Shrink-Tree)
 
-(: value (All (a) (-> (shrink-tree a) a)))
+(: value (All (a) (-> (Shrink-Tree a) a)))
 (define value shrink-tree-val)
 
-(: shrink (All (a) (-> (shrink-tree a) (Listof (shrink-tree a)))))
+(: shrink (All (a) (-> (Shrink-Tree a) (Listof (Shrink-Tree a)))))
 (define (shrink st)
   (force (shrink-tree-shrinks st)))
 
-(: build-shrink-tree (All (a) (-> a (-> a (Listof a)) (shrink-tree a))))
+(: make-shrink-tree (All (a) (->* (a) ((Promise (Listof (Shrink-Tree a)))) (Shrink-Tree a))))
+(define (make-shrink-tree val [shrinks (delay '())])
+  (shrink-tree val shrinks))
+
+(: build-shrink-tree (All (a) (-> a (-> a (Listof a)) (Shrink-Tree a))))
 (define (build-shrink-tree val shr)
   (shrink-tree
    val
    (delay (map (lambda ([v : a]) (build-shrink-tree v shr))
               (shr val)))))
 
-(: shrink-tree-map (All (a b) (-> (-> a b) (shrink-tree a) (shrink-tree b))))
+(: shrink-tree-map (All (a b) (-> (-> a b) (Shrink-Tree a) (Shrink-Tree b))))
 (define (shrink-tree-map f st)
   (shrink-tree
    (f (value st))
-   (delay (map (lambda ([st : (shrink-tree a)]) (shrink-tree-map f st))
+   (delay (map (lambda ([st : (Shrink-Tree a)]) (shrink-tree-map f st))
                (shrink st)))))
 
-(: shrink-tree-join (All (a) (-> (shrink-tree (shrink-tree a)) (shrink-tree a))))
+(: shrink-tree-join (All (a) (-> (Shrink-Tree (Shrink-Tree a)) (Shrink-Tree a))))
 (define (shrink-tree-join st)
   (shrink-tree
    (value (value st))
-   (delay (append (map (lambda ([st : (shrink-tree (shrink-tree a))])
+   (delay (append (map (lambda ([st : (Shrink-Tree (Shrink-Tree a))])
                          (shrink-tree-join st))
                        (shrink st))
                   (shrink (value st))))))
 
-(define-type (Gen a) (-> Pseudo-Random-Generator Natural (shrink-tree a)))
+(define-type (Gen a) (-> Pseudo-Random-Generator Natural (Shrink-Tree a)))
+
+;(struct (a) gen ([f : (Gen a)]) #:property prop:procedure (struct-field-index f))
 
 (: sample (All (a) (->* ((Gen a)) (Natural Pseudo-Random-Generator) (Listof a))))
 (define (sample g [n 10] [rng (current-pseudo-random-generator)])
@@ -78,7 +87,7 @@
     (values
      (shrink-tree-val st)
      (let* ([shrinks (shrink st)]
-            [starts ((inst random-sample (shrink-tree a))
+            [starts ((inst random-sample (Shrink-Tree a))
                      shrinks (min n (length shrinks)) rng #:replacement? #f)])
        (for/list ([st starts])
          (let loop : (Listof (U a '...))
@@ -144,22 +153,28 @@
         (λ ([val : a]) ((h val) (vector->pseudo-random-generator rng-state) size))
         g-st)))))
 
-(: shrink-tree-filter (All (a) (-> (-> a Boolean) (shrink-tree a) (Option (shrink-tree a)))))
+(: shrink-tree-filter (All (a b)
+                           (case->
+                            (-> (-> a Boolean : #:+ b) (Shrink-Tree a) (Option (Shrink-Tree b)))
+                            (-> (-> a Boolean) (Shrink-Tree a) (Option (Shrink-Tree a))))))
 (define (shrink-tree-filter p st)
   (let ([v (value st)])
     (if (p v)
         (shrink-tree
          v
          (delay
-           (filter-map (lambda ([st : (shrink-tree a)])
+           (filter-map (lambda ([st : (Shrink-Tree a)])
                          (shrink-tree-filter p st))
                        (shrink st))))
         #f)))
 
-(: gen:filter (All (a) (->* ((Gen a) (-> a Boolean)) (Natural) (Gen a))))
+(: gen:filter (All (a b)
+                   (case->
+                    (->* ((Gen a) (-> a Boolean : #:+ b)) (Natural) (Gen b))
+                    (->* ((Gen a) (-> a Boolean)) (Natural) (Gen a)))))
 (define (gen:filter g p [max-attempts 1000])
   (lambda (rng size)
-    (let search : (shrink-tree a)
+    (let search
       ([attempts : Natural 0]
        [size : Natural size])
       (let ([st? (shrink-tree-filter p (g rng size))])
@@ -202,9 +217,6 @@
   (lambda (rng size)
     (build-shrink-tree (value (g rng size)) shr)))
 
-#;(module+ private
-  (provide shrink-tree))
-
 (module+ test
   (require typed/rackunit)
 
@@ -231,6 +243,6 @@
   (check-exn
    exn:fail:gen?
    (lambda ()
-     (sample (gen:filter (gen:const 1)
-                         (lambda ([v : Natural])
+     (sample (gen:filter (gen:const -1)
+                         (lambda ([v : Integer])
                            (eqv? v 2)))))))
